@@ -146,21 +146,18 @@ scene_new_compare <- update_forced_f_rate_moderate(
 
 
 
-NUM_RUNS <- 13500
+NUM_RUNS <- 40000
 parlist   <- vector("list", NUM_RUNS)
 kept      <- logical(NUM_RUNS)
 set.seed(666)
 
-# group‑specific acceptance thresholds (relative to year 51 biomass)
+
 initial_bio <- REco$Biomass
-max_allowed <- rep(NA_real_, length(initial_bio))
-max_allowed[initial_bio < 1e3]                       <- 100
-max_allowed[initial_bio >= 1e3  & initial_bio < 1e4] <- 50
-max_allowed[initial_bio >= 1e4  & initial_bio < 1e5] <- 25
-max_allowed[initial_bio >= 1e5  & initial_bio < 1e6] <- 15
-max_allowed[initial_bio >= 1e6  & initial_bio < 1e7] <- 10
-max_allowed[initial_bio >= 1e7]                      <- 6
+max_allowed <- rep(Inf, length(initial_bio))   
 names(max_allowed) <- names(initial_bio)
+
+if ("SB" %in% names(max_allowed)) max_allowed["SB"] <- 1.15       # ±10% allowed
+if ("WMW" %in% names(max_allowed)) max_allowed["WMW"] <- 1.20  # ±20% allowed
 
 for (i in 1:NUM_RUNS) {
   ISLsense <- scene_new_compare
@@ -206,7 +203,6 @@ cat("Kept runs:", nkept, "of", NUM_RUNS, " (", round(100*nkept/NUM_RUNS,1), "%)\
 isl.sense_final <- parlist[KEPT]
 
 
-
 ## Final simulations (Status Quo + Capelin scenarios)
 
 results_capelin <- list()
@@ -223,7 +219,7 @@ for (irun in 1:nkept) {
   # start biomass = this draw’s Ecopath equilibrium
   run.scene$start_state$Biomass <- run.scene$params$B_BaseRef
   
-  # ensure key groups are integrated (your original set)
+  # ensure key groups are integrated 
   run.scene$params$NoIntegrate[c("FCD.adult","FCD.juv",
                                  "FHA.adult","FHA.juv",
                                  "FSA.adult","FSA.juv",
@@ -297,7 +293,7 @@ res_m1_sq <- purrr::map_dfr(names(results_sq), function(irun) {
 
 # --- Stability filter (Status Quo only) to define shared runs ---
 filter_stable_runs <- function(data, deviation_multiplier = 2,
-                               year_threshold = 0.25, group_threshold = 8) {
+                               year_threshold = 0.25, group_threshold = 12) {
   data_long <- data |>
     pivot_longer(starts_with("Biomass."), names_to = "Biomass_Type", values_to = "Biomass_Value") |>
     mutate(Group = sub("^Biomass\\.", "", Biomass_Type))
@@ -324,7 +320,7 @@ filter_stable_runs <- function(data, deviation_multiplier = 2,
 }
 
 shared_runs <- filter_stable_runs(res_m1_sq, deviation_multiplier = 2,
-                                  year_threshold = 0.25, group_threshold = 8)
+                                  year_threshold = 0.25, group_threshold = 10)
 
 # --- Filter all scenarios to shared runs ---
 res_m1_sq_f     <- res_m1_sq     |> filter(Run_ID %in% shared_runs)
@@ -334,7 +330,7 @@ res_m1_down0_f  <- res_m1_down0  |> filter(Run_ID %in% shared_runs)
 cat("✅ Systems kept after filtering Status_Quo:", length(shared_runs),
     "of", length(unique(res_m1_sq$Run_ID)), "\n")
 
-# --- Helpers (define once) ---
+# --- plot (define once) ---
 mk_IQR_plot <- function(df, x, yM, yL, yU, color = "scenario", fill = "scenario",
                         title = "", ylab = "", facet = NULL, ncol = 2,
                         hline = NA, limits_year = c(2000, 2100)) {
@@ -344,7 +340,7 @@ mk_IQR_plot <- function(df, x, yM, yL, yU, color = "scenario", fill = "scenario"
     geom_line(size = 1.1) +
     scale_color_manual(values = pal) + scale_fill_manual(values = pal) +
     labs(title = title, x = "Year", y = ylab, color = "Scenario", fill = "Scenario") +
-    theme_minimal(base_size = 13) +
+    theme_bw(base_size = 13) +
     theme(legend.position = "top",
           strip.text = element_text(face = "bold"),
           panel.grid.minor = element_blank())
@@ -409,8 +405,9 @@ cap_q <- cap_runs %>%
 Fig1 <- mk_IQR_plot(cap_q, x="Year_actual", yM="Med", yL="Q25", yU="Q75",
                     title = "",
                     ylab = "Relative biomass", hline = 1, limits_year = c(2000, 2100))
-ggsave("files_for_capelin_paper/Figures/Fig1_Capelin_relative_IQR.png", Fig1, width = 7.2, height = 4.6, dpi = 350)
-
+ggsave("files_for_capelin_paper/Figures/Fig1_Capelin_relative_IQR.png", Fig1, width = 4, height = 4, dpi = 350)
+ggsave("files_for_capelin_paper/Figures/Fig1_Capelin_relative_IQR.png",
+       Fig1, width = 120, height = 120, units = "mm", dpi = 350)
 # =========================================================
 # FIGURE 2 — TL bins, per-run normalized (relative), IQR only
 # =========================================================
@@ -442,8 +439,7 @@ Fig2 <- mk_IQR_plot(tl_rel_q %>% filter(Year_actual >= 2000),
 ggsave("files_for_capelin_paper/Figures/Fig2_TLbins_relative_IQR.png", Fig2, width = 10, height = 5.2, dpi = 350)
 
 # =========================================================
-# FIGURE 3 — Key predators (relative), IQR only
-#   (Choose only the ones you actually show in the paper.)
+# FIGURE 3 — Key predators (relative)
 # =========================================================
 key_pred_groups <- c("FCD.adult","FCD.juv","FHA.adult","FSA.adult","WMW","SB")  # <- final set
 
@@ -476,73 +472,93 @@ ggsave("files_for_capelin_paper/Figures/Fig3_KeyPredators_relative_IQR.png", Fig
 # =========================================================
 # FIGURE 4 — Ecosystem indicators (relative/delta), combined
 # =========================================================
-runs_with_TL <- runs_long %>%
-  left_join(select(TL_table, Biomass_Type, TL), by = c("Biomass_Type_key" = "Biomass_Type")) %>%
-  filter(!is.na(TL))
 
-ind_per_run <- runs_with_TL %>%
-  group_by(scenario, Run_ID, Year_actual) %>%
-  summarize(
-    TotalB = sum(Biomass, na.rm = TRUE),
-    MTLbio = sum(Biomass * TL, na.rm = TRUE) / pmax(sum(Biomass, na.rm = TRUE), 1e-12),
-    PredB  = sum(Biomass[TL >= 3], na.rm = TRUE),
-    PreyB  = sum(Biomass[TL <  3], na.rm = TRUE),
-    PP     = PredB / pmax(PreyB, 1e-12),
-    .groups = "drop"
-  )
-
-ind_base <- ind_per_run %>%
-  filter((Year_actual - 1995) %in% 1:25) %>%
-  group_by(scenario, Run_ID) %>%
-  summarize(
-    base_TotalB = mean(TotalB, na.rm = TRUE),
-    base_MTL    = mean(MTLbio, na.rm = TRUE),
-    base_PP     = mean(PP, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-ind_rel <- ind_per_run %>%
-  left_join(ind_base, by = c("scenario","Run_ID")) %>%
+# Reshape into long format
+ind_q_long <- ind_q %>%
+  pivot_longer(
+    cols = c(TB_M, TB_L, TB_U,
+             MTL_M, MTL_L, MTL_U,
+             PP_M, PP_L, PP_U),
+    names_to = c("Indicator", ".value"),
+    names_pattern = "(.*)_(M|L|U)"
+  ) %>%
   mutate(
-    RelTotalB = TotalB / pmax(base_TotalB, 1e-12),
-    DeltaMTL  = MTLbio - base_MTL,
-    RelPP     = PP / pmax(base_PP, 1e-12)
+    Indicator = recode(Indicator,
+                       TB  = "Relative total biomass",
+                       MTL = "Δ Mean trophic level",
+                       PP  = "Predator : Prey ratio"
+    )
   )
 
-ind_q <- ind_rel %>%
-  group_by(scenario, Year_actual) %>%
-  summarize(
-    TB_M = median(RelTotalB, na.rm = TRUE),
-    TB_L = quantile(RelTotalB, 0.25, na.rm = TRUE),
-    TB_U = quantile(RelTotalB, 0.75, na.rm = TRUE),
-    MTL_M = median(DeltaMTL, na.rm = TRUE),
-    MTL_L = quantile(DeltaMTL, 0.25, na.rm = TRUE),
-    MTL_U = quantile(DeltaMTL, 0.75, na.rm = TRUE),
-    PP_M = median(RelPP, na.rm = TRUE),
-    PP_L = quantile(RelPP, 0.25, na.rm = TRUE),
-    PP_U = quantile(RelPP, 0.75, na.rm = TRUE),
-    .groups = "drop"
-  ) %>% filter(Year_actual >= 2000)
+# Plot with facets
+Fig4 <- ggplot(ind_q_long, aes(x = Year_actual, y = M,
+                               color = scenario, fill = scenario)) +
+  geom_ribbon(aes(ymin = L, ymax = U), alpha = 0.18, color = NA) +
+  geom_line(size = 1.1) +
+  scale_color_manual(values = pal) +
+  scale_fill_manual(values = pal) +
+  facet_wrap(~ Indicator, ncol = 3, scales = "free_y") +
+  scale_x_continuous(limits = c(2000, 2100)) +        # <- force 2100 to appear
+  labs(x = "Year", y = NULL, color = "Scenario", fill = "Scenario") +
+  theme_bw(base_size = 13) +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  )
 
-pA <- mk_IQR_plot(ind_q, "Year_actual", "TB_M","TB_L","TB_U",
-                  title="", ylab="Relative total biomass", hline = 1) +
-  theme(legend.position = "none")
-pB <- mk_IQR_plot(ind_q, "Year_actual", "MTL_M","MTL_L","MTL_U",
-                  title="", ylab="Δ Mean trophic level", hline = 0) +
-  theme(legend.position = "none")
-pC <- mk_IQR_plot(ind_q, "Year_actual", "PP_M","PP_L","PP_U",
-                  title="", ylab="Predator : Prey ratio", hline = 1) +
-  theme(legend.position = "none")
+Fig4
+ggsave("files_for_capelin_paper/Figures/Fig4_Indicators_combined.png", Fig4, width = 10, height = 4, dpi = 350)
 
-Fig4 <- (pA | pB | pC) + plot_layout(guides = "collect") +
-  plot_annotation(title = "",
-                  theme = theme(plot.title = element_text(face = "bold", hjust = 0.5))) & 
-  theme(legend.position = "top")
+end_summary <- ind_q_long %>%
+  filter(Year_actual >= 2091, Year_actual <= 2100) %>%
+  group_by(Indicator, scenario) %>%
+  summarise(M = mean(M, na.rm = TRUE),
+            L = mean(L, na.rm = TRUE),
+            U = mean(U, na.rm = TRUE),
+            .groups = "drop") %>%
+  # ensure facet order matches labels A/B/C
+  mutate(Indicator = factor(
+    Indicator,
+    levels = c("Predator : Prey ratio",
+               "Relative total biomass",
+               "Δ Mean trophic level")
+  ))
+
+# panel tags for each facet
+tag_df <- data.frame(
+  Indicator = levels(end_summary$Indicator),
+  tag = c("a)", "b)", "c)")
+)
+
+Fig4 <- ggplot(end_summary,
+                aes(x = scenario, y = M, ymin = L, ymax = U, color = scenario)) +
+  geom_hline(aes(yintercept = ifelse(Indicator == "Δ Mean trophic level", 0, 1)),
+             linetype = 3, color = "grey40") +
+  geom_errorbar(width = 0.15, size = 0.7) +
+  geom_point(size = 3) +
+  # add panel tags in top-left corner of each facet
+  geom_text(data = tag_df, aes(x = -Inf, y = Inf, label = tag),
+            inherit.aes = FALSE, hjust = -0.1, vjust = 1.2,
+            fontface = "bold", size = 5) +
+  scale_color_manual(values = pal) +
+  facet_wrap(~ Indicator, ncol = 3, scales = "free_y") +
+  labs(x = NULL, y = NULL, color = "Scenario",
+       subtitle = "Mean (± band) over Years 2091–2100") +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "top",
+    strip.text = element_text(face = "bold"),
+    panel.grid.minor = element_blank()
+  ) +
+  coord_cartesian(clip = "off")  
+
+
 ggsave("files_for_capelin_paper/Figures/Fig4_Indicators_combined.png", Fig4, width = 10, height = 4, dpi = 350)
 
 # =========================================================
 # FIGURE 5 — “Competitors of capelin” (relative), IQR only
-#   (Built from diet overlap; keep ONLY the N you show.)
+#   (Built from diet overlap)
 # =========================================================
 prey_name <- "FCA"
 
@@ -577,7 +593,7 @@ comp_tbl <- tibble(
   mutate(SharedConsShare = SharedCons / pmax(sum(SharedCons), 1e-12)) %>%
   arrange(desc(Overlap_with_FCA))
 
-# Use ONLY the 6 you decided to show (order preserved)
+# Use ONLY top 6 (ordered)
 comp_groups <- c("CEP","FHE","FBP","ZG","FSD","FKR")
 name_map_comp <- c("CEP"="Cephalopods","FHE"="Herring","FBP"="Small pelagic fish",
                    "ZG"="Gelatinous zooplankton","FSD"="Sandeel","FKR"="Krill")
@@ -637,10 +653,11 @@ Fig6 <- mk_IQR_plot(prey_q_comp %>% filter(Year_actual >= 2000),
 ggsave("files_for_capelin_paper/Figures/Fig6_capelin_prey_relative_IQR.png", Fig6, width = 10, height = 4, dpi = 350)
 
 
+
 # TABLES
 
 #Key predators: % change last decade vs. SQ ----
-report_groups <- c("FCA","FCD.adult","FCD.juv","FHA.adult","FSA.adult","SB","WMW")
+report_groups <- c("FCA","FCD.adult","FCD.juv","FHA.adult","FSA.juv","SB","WMW")
 last10 <- runs_long %>%
   filter(Biomass_Type %in% report_groups, Year %in% 91:100) %>%
   group_by(scenario, Run_ID, Biomass_Type) %>%
@@ -668,6 +685,8 @@ table_pred_wide <- pct_per_run %>%
   arrange(match(Biomass_Type, report_groups))
 
 # Competitors table 
+comp_groups <- c("CEP", "FHE", "FBP", "ZG", "FSD", "FKR")
+
 common_runs_comp <- runs_long %>%
   filter(Biomass_Type %in% comp_groups) %>%
   group_by(scenario) %>% summarise(runs = list(unique(Run_ID)), .groups = "drop") %>%
@@ -733,15 +752,207 @@ table_kz_wide <- dat_kz %>% filter(scenario != "Status Quo") %>%
   arrange(match(Group, unname(recode(target_groups, !!!name_map_kz))))
 
 
+# Take mean biomass over last 10 years (Years 91–100)
+tl_last10 <- runs_tl_rel %>%
+  filter(Year_actual %in% 2086:2095) %>%
+  group_by(scenario, Run_ID, TL_group) %>%
+  summarize(MeanLast10 = mean(Rel, na.rm = TRUE), .groups = "drop")
+
+# Extract Status Quo baseline
+sq_tl_last10 <- tl_last10 %>%
+  filter(scenario == "Status Quo") %>%
+  select(Run_ID, TL_group, SQ = MeanLast10)
+
+# Compute % change vs SQ
+pct_tl <- tl_last10 %>%
+  filter(scenario != "Status Quo") %>%
+  left_join(sq_tl_last10, by = c("Run_ID","TL_group")) %>%
+  mutate(Pct_vs_SQ = 100 * (MeanLast10 / pmax(SQ, 1e-12) - 1))
+
+# Summarize median and IQR per TL group × scenario
+table_tl_wide <- pct_tl %>%
+  group_by(TL_group, scenario) %>%
+  summarize(
+    Median = median(Pct_vs_SQ, na.rm = TRUE),
+    Q25    = quantile(Pct_vs_SQ, 0.25, na.rm = TRUE),
+    Q75    = quantile(Pct_vs_SQ, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(Stat = sprintf("%.1f (%.1f, %.1f)", Median, Q25, Q75)) %>%
+  select(TL_group, scenario, Stat) %>%
+  pivot_wider(names_from = scenario, values_from = Stat) %>%
+  arrange(TL_group)
+
+# Save table
+write_csv(table_tl_wide,
+          "Table_TLbins_LastDecade_PercentChange_vsSQ_medianIQR.csv")
 # Also save CSVs if you need them
 write_csv(table_pred_wide, "Table_KeyPredators_LastDecade_PercentChange_vsSQ_medianIQR.csv")
 write_csv(table_comp_wide, "Table_Competitors_LastDecade_PercentChange_vsSQ_medianIQR.csv")
 write_csv(table_kz_wide,   "Table_Krill_LZ_LastDecade_PercentChange_vsSQ_medianIQR.csv")
 
 
+## supplementary figures
+
+
+# --- Extract Ecopath components ---
+diet_mat    <- REco$DC      
+QB          <- REco$QB       
+B           <- REco$Biomass   
+group_names <- REco$Group    
+codes       <- names(B)      
+
+# --- Focus on Capelin (FCA) as prey ---
+prey <- "FCA"
+
+# Diet share on capelin for each predator
+d_cap <- diet_mat[ prey,]
+
+# Keep only biological consumers (B > 0, QB > 0)
+valid_preds <- which(B > 0 & QB > 0)
+
+# Compute metrics
+Ik <- QB[valid_preds] * d_cap[valid_preds]                     # relative dependence (per biomass rate)
+Fk <- B[valid_preds]  * QB[valid_preds] * d_cap[valid_preds]   # absolute removal (biomass flux)
+
+# --- Build dependence table ---
+dependence_table <- data.frame(
+  Predator   = codes[valid_preds],
+  GroupName  = group_names[valid_preds],
+  Ik         = Ik,
+  Fk         = Fk
+) %>%
+  filter(Ik > 0 | Fk > 0) %>%          # drop non-predators of capelin
+  arrange(desc(Ik))                    # rank by relative dependence
+
+# --- Add top 6 flag ---
+dependence_table <- dependence_table %>%
+  mutate(Top6 = Predator %in% head(Predator, 6))
+
+# --- Plot Relative dependence (Ik) ---
+p1 <- dependence_table %>%
+  top_n(15, Ik) %>%   # show top 15 predators
+  ggplot(aes(x = reorder(GroupName, Ik), y = Ik, fill = Top6)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "firebrick", "FALSE" = "grey70")) +
+  labs(x = "Predator", y = "Relative dependence (Ik)", fill = "Top 6") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "")
+
+# --- Plot Absolute removal (Fk) ---
+p2 <- dependence_table %>%
+  top_n(15, Fk) %>%   # show top 15 predators
+  ggplot(aes(x = reorder(GroupName, Fk), y = Fk, fill = Top6)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "grey70")) +
+  labs(x = "Predator", y = "Absolute removal (Fk, biomass units)", fill = "Top 6") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "")
+
+# --- Combine Ik and Fk plots side by side ---
+Fig_S1 <- p1 | p2
+ggsave("files_for_capelin_paper/Figures/Fig_S1_CapelinPredators_Ik_Fk.png",
+       Fig_S1, width = 12, height = 5.5, units = "in", dpi = 350)
+
+
+# supp fig2
+
+diet_df    <- as.data.frame(REco.params$diet)        # rows = prey, cols = predators
+pred_names <- setdiff(names(diet_df), "Group")
+diet_mat   <- as.matrix(diet_df[, pred_names, drop = FALSE])
+diet_mat   <- sweep(diet_mat, 2, pmax(colSums(diet_mat, na.rm = TRUE), 1e-12), `/`)  # normalize cols
+
+cap <- "FCA"                        # Capelin as predator (competitor target)
+p_cap <- as.numeric(diet_mat[, cap])
+
+B  <- as.numeric(REco$Biomass[pred_names])
+QB <- as.numeric(REco$QB[pred_names])
+names(B)  <- pred_names
+names(QB) <- pred_names
+
+# Keep only valid consumers
+valid <- pred_names[B[pred_names] > 0 & QB[pred_names] > 0 & pred_names != cap]
+
+# Schoener diet overlap and shared consumption on *common resources*
+schoener <- sapply(valid, function(sp){
+  p_k <- diet_mat[, sp]
+  1 - 0.5 * sum(abs(p_cap - p_k), na.rm = TRUE)
+})
+
+shared_frac <- sapply(valid, function(sp){
+  p_k <- diet_mat[, sp]
+  sum(pmin(p_cap, p_k), na.rm = TRUE)
+})
+
+shared_Q    <- shared_frac * (B[valid] * QB[valid])   # overlap × consumer demand proxy
+
+scho_tbl <- tibble::tibble(
+  Group = valid,
+  SchoenerD = as.numeric(schoener),
+  SharedFrac = as.numeric(shared_frac),
+  SharedQ = as.numeric(shared_Q),
+  Biomass = B[valid],
+  QB = QB[valid],
+  Label = REco$Group[valid]
+) %>%
+  dplyr::arrange(dplyr::desc(SchoenerD))
+
+top6_ids <- c("FHE","FSD","FBP","CEP","FKR","ZG")  
+plot_dat  <- scho_tbl %>% mutate(SharedQ_Mt = SharedQ/1e6, is_top6 = Group %in% top6_ids)
 
 
 
+top6_labels <- scho_tbl %>%
+  filter(Group %in% top6_ids) %>%
+  distinct(Group, Label) %>%
+  arrange(Label) %>%                    
+  pull(Label)
+
+cols_top6 <- setNames(scales::hue_pal()(length(top6_labels)), top6_labels)
+
+# ----- pA: Top-N by SchoenerD, with fills matching pB -----
+topN <- 12
+pA_dat <- scho_tbl %>%
+  arrange(desc(SchoenerD)) %>%
+  slice_head(n = topN) %>%
+  mutate(fill_label = ifelse(Label %in% names(cols_top6), Label, "Other"))
 
 
 
+pA <- ggplot(pA_dat, aes(x = reorder(Label, SchoenerD), y = SchoenerD, fill = fill_label)) +
+  geom_col( width = 0.8) +
+  geom_hline(yintercept = c(0.6, 0.8), linetype = 3, color = "grey40") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c(Other = "grey80", cols_top6),
+    drop   = FALSE
+  ) +
+  labs(x = "Potential competitor", y = "Schoener diet overlap with capelin (D)") +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "none"  
+  )
+pB <- ggplot(plot_dat, aes(SchoenerD, SharedQ_Mt)) +
+  geom_point(data = subset(plot_dat, !is_top6), color="grey75", alpha=.6, size=2) +
+  geom_point(data = subset(plot_dat,  is_top6), aes(color = Label), size=3) +
+  ggrepel::geom_text_repel(
+    data = subset(plot_dat, is_top6),
+    aes(label = Label, color = Label),
+    size = 3.2, box.padding = .5, max.overlaps = 100, seed = 42
+  ) +
+  geom_vline(xintercept = c(0.6, 0.8), linetype = 3) +
+  scale_color_manual(values = cols_top6) +
+  labs(x = "Schoener overlap with capelin (D)",
+       y = "Shared consumption on common prey (million tonnes · yr⁻¹)") +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "none"   
+  )
+
+Fig_S22 <- pA | pB
+
+ggsave("files_for_capelin_paper/Figures/Fig_S22_competition_schoener.png", Fig_S22, width = 14, height = 10, dpi = 350)
