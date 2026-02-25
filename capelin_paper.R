@@ -1,4 +1,3 @@
-library(tidyverse)
 library(data.table)
 library(Rpath)
 library(mfdb)
@@ -11,7 +10,7 @@ mdb <- mfdb('Iceland', db_params = list(host='mfdb.hafro.is'))
 mar <- connect_mar()
 
 fit.years <- 1:100
-mccores <- 35
+mccores <- 40
 
 REco.params <- get(load("REco.params_Iceland.RData"))
 source("pedigree.R")
@@ -42,7 +41,7 @@ update_forced_f_rate_5yrmean <- function(scene,
          " requires at least ", end_year + 1, " rows.")
   }
   
-  # compute mean of last 5 years (or all available if shorter)
+  # compute mean of last 5 years 
   get_postF <- function(x) {
     hist <- x[seq_len(end_year)]
     hist <- hist[is.finite(hist)]
@@ -55,7 +54,7 @@ update_forced_f_rate_5yrmean <- function(scene,
   #Default post-history F for all groups
   default_post <- apply(FF, 2, get_postF)
   
-  # --- Special treatment for Capelin (FCA)
+  # Special treatment for Capelin (FCA)
   if (length(special)) {
     for (nm in names(special)) {
       if (nm %in% colnames(FF)) {
@@ -76,7 +75,7 @@ update_forced_f_rate_5yrmean <- function(scene,
     }
   }
   
-  # --- Apply post-history F values to projection years
+  #  Apply post-history F values to projection years
   if (end_year < nT) {
     FF[(end_year + 1):nT, ] <- matrix(rep(default_post, each = nT - end_year),
                                       nrow = nT - end_year, ncol = nG,
@@ -95,7 +94,7 @@ scene_new_compare <- update_forced_f_rate_5yrmean(
   end_year = 29, damp = 1)
 
 
-NUM_RUNS <- 50000
+NUM_RUNS <- 100000
 set.seed(666)
 initial_bio <- REco$Biomass
 
@@ -161,12 +160,41 @@ warm_start_scene <- function(scene, years = 1:30) {
   scene
 }
 
-## Final simulations (Status Quo + Capelin scenarios)
+check_stable <- function(bio_mat,
+                         groups_exclude = c("Outside","Detritus","Phytoplankton"),
+                         window = 5,
+                         threshold = 0.02) {
+  
+  # Keep only biological groups
+  keep_groups <- setdiff(colnames(bio_mat), groups_exclude)
+  B <- as.matrix(bio_mat[, keep_groups, drop = FALSE])
+  
+  # Year-to-year absolute proportional change
+  delta <- abs(diff(B) / pmax(B[-nrow(B), ], 1e-12))
+  
+  # Rolling 5-year max change
+  library(zoo)
+  roll_max <- apply(delta, 2, function(x) {
+    zoo::rollapply(x, width = window, FUN = max,
+                   align = "left", fill = NA)
+  })
+  
+  stable_index <- which(apply(roll_max < threshold, 1, all))[1]
+  
+  if (is.na(stable_index)) {
+    return(list(stable = FALSE, year = NA))
+  }
+  
+  # +1 because diff removed first year
+  return(list(stable = TRUE, year = stable_index + 1))
+}
+test <- rsim.run(scene_new_compare, method = "AB", years = 1:100)
 
+stab <- check_stable(test$annual_Biomass)
 set.seed(123)
 
 BURN_IN <- 0  
-perturb_start <- 53   # perturbations start here 2048 (biomass has stabilized)
+perturb_start <- stab$year[[1]]   # perturbations start here 2041 (biomass has stabilized - fluctuates less than 2% between years)
 
 results_capelin <-
   do.call("c",
@@ -216,8 +244,6 @@ results_capelin <-
                                  sim.year = perturb_start:100, value = bio.ref * 1e-5)
             
             
-            
-            
             r0 <- rsim.run(s0, method = "AB", years = fit.years)
             r0_dt <- as.data.table(r0$annual_Biomass)[, Year := 1:100][Year > BURN_IN]
             out[[paste0("Down_Zero_", irun)]] <- melt(
@@ -239,9 +265,9 @@ save(results_down0,  file = "files_for_capelin_paper/results_down0.RData")
 save(results_sq,     file = "files_for_capelin_paper/results_sq.RData")
 
 ## load
-# load("files_for_capelin_paper/results_down50.RData")  # loads results_down50
-# load("files_for_capelin_paper/results_down0.RData")   # loads results_down0
-# load("files_for_capelin_paper/results_sq.RData")      # loads results_sq
+load("files_for_capelin_paper/results_down50.RData")  # loads results_down50
+load("files_for_capelin_paper/results_down0.RData")   # loads results_down0
+load("files_for_capelin_paper/results_sq.RData")      # loads results_sq
 
 #  Build wide data frames from raw lists
 res_m1_down50 <- purrr::map_dfr(names(results_down50), function(irun) {
@@ -329,8 +355,8 @@ group_run_minmax <- pred_runs_comp %>%
 bad_runs_per_scenario <- group_run_minmax %>%
   group_by(scenario, Biomass_Type) %>%
   mutate(
-    cutoff_high = quantile(maxRel, 0.99, na.rm = TRUE),
-    cutoff_low  = quantile(minRel, 0.01, na.rm = TRUE)
+    cutoff_high = quantile(maxRel, 0.975, na.rm = TRUE),
+    cutoff_low  = quantile(minRel, 0.025, na.rm = TRUE)
   ) %>%
   filter(
     maxRel > cutoff_high |   # extreme spikes
@@ -377,19 +403,19 @@ Fig1 <- ggplot(cap_q, aes(x = Year_actual, y = Med, color = scenario)) +
     aes(ymin = Q25, ymax = Q75, fill = "95% CI"),
     alpha = 0.18, color = "NA",
     fill = "#2ca25f") +
-  geom_line(size = 1.1) +
+  geom_line(size = 0.8) +
   geom_hline(yintercept = 1, linetype = "dotted") +
   scale_color_manual(values = pal) +
   scale_fill_manual(values = c("95% CI" = pal["Status Quo"])) +
   labs(x = "Year",
-    y = expression("Relative biomass (B / B"[0]*")"),
-    color = "Scenario",
-    fill  = "") +
+       y = expression("Relative biomass (B / B"[mean] * ")"),
+       color = "Scenario",
+       fill  = "") +
   scale_x_continuous(limits = c(1995, 2100)) +
   theme_bw(base_size = 13) +
   theme(legend.position = "top",
-    strip.text = element_text(face = "bold"),
-    panel.grid.minor = element_blank())
+        strip.text = element_text(face = "bold"),
+        panel.grid.minor = element_blank())
 Fig1
 
 ggsave("files_for_capelin_paper/Figures/Fig1_Capelin_relative_IQR.png",
@@ -417,29 +443,44 @@ tl_rel_q <- runs_tl_rel %>%
     .groups = "drop"
   )
 # --- plot function ---
-capelin_plots <- function(df, x, yM, yL, yU, color = "scenario", fill = "scenario",
-                        title = "", ylab = "", facet = NULL, ncol = 2,
-                        hline = NA, limits_year = c(1995, 2100)) {
-  g <- ggplot(df, aes(x = .data[[x]], y = .data[[yM]],
-                      color = .data[[color]], fill = .data[[fill]])) +
-    geom_ribbon(aes(ymin = .data[[yL]], ymax = .data[[yU]]), alpha = 0.18, color = NA) +
-    geom_line(size = 1.1) +
-    scale_color_manual(values = pal) + scale_fill_manual(values = pal) +
-    labs(title = title, x = "Year", y = ylab, color = "Scenario", fill = "Scenario") +
+capelin_plots <- function(df, x, yM, yL, yU,
+                          color = "scenario", fill = "scenario",
+                          title = "", ylab = "", facet = NULL, ncol = 2,
+                          hline = NA, limits_year = c(1995, 2100),
+                          baseline_scenario = "Status Quo",
+                          perturb_start_year = 2041) {
+  
+  g <- ggplot(df, aes(x = .data[[x]], y = .data[[yM]])) +
+    geom_ribbon(data = df %>%dplyr::filter(.data[[color]] == baseline_scenario),
+                aes(ymin = .data[[yL]],ymax = .data[[yU]],fill = .data[[fill]]),
+                alpha = 0.25,color = NA) +
+    geom_ribbon(
+      data = df %>%dplyr::filter(.data[[color]] != baseline_scenario,.data[[x]] >= perturb_start_year),
+      aes(ymin = .data[[yL]],ymax = .data[[yU]],fill = .data[[fill]]),alpha = 0.18,color = NA) +
+    geom_line(aes(color = .data[[color]]),size = 0.8) +
+    scale_color_manual(values = pal) +
+    scale_fill_manual(values = pal) +
+    labs(title = title,x = "Year",y = ylab,color = "Scenario",fill = "Scenario") +
     theme_bw(base_size = 13) +
-    theme(legend.position = "top",
-          strip.text = element_text(face = "bold"),
-          panel.grid.minor = element_blank())
-  if (!is.na(hline)) g <- g + geom_hline(yintercept = hline, linetype = "dotted")
-  if (!is.null(facet)) g <- g + facet_wrap(as.formula(paste("~", facet)), ncol = ncol, scales = "free_y")
-  if (!is.null(limits_year)) g <- g + scale_x_continuous(limits = limits_year)
+    theme(legend.position = "top",strip.text = element_text(face = "bold"),panel.grid.minor = element_blank())
+  if (!is.na(hline))
+    g <- g + geom_hline(yintercept = hline, linetype = "dotted")
+  if (!is.null(facet))
+    g <- g + facet_wrap(as.formula(paste("~", facet)),
+                        ncol = ncol, scales = "free_y")
+  if (!is.null(limits_year))
+    g <- g + scale_x_continuous(limits = limits_year)
   g
 }
 
+
 Fig2 <- capelin_plots(tl_rel_q %>% filter(Year_actual >= 1996),
-                    x="Year_actual", yM="Med", yL="Q25", yU="Q75",
-                    title = "",
-                    ylab = expression("Relative biomass (B / B"[0]*")"), facet = "TL_group", ncol = 2, hline = 1)
+                      x="Year_actual", yM="Med", yL="Q25", yU="Q75",
+                      title = "",
+                      ylab = expression("Relative biomass (B / B"[mean] * ")"),facet = "TL_group", ncol = 2, hline = 1)
+Fig2
+
+
 ggsave("files_for_capelin_paper/Figures/Fig2_TLbins_relative_IQR.png", Fig2, width = 10, height = 5.2, dpi = 350)
 
 
@@ -447,7 +488,7 @@ ggsave("files_for_capelin_paper/Figures/Fig2_TLbins_relative_IQR.png", Fig2, wid
 # FIGURE 3 — Key predators (relative)
 key_pred_groups <- c("FCD.adult","FCD.juv","FHA.adult","FSA.adult","WMW","SB")  # <- final set
 
-pred_runs <- runs_long_filtered %>%
+pred_runs <- runs_long_filtered%>%
   filter(Biomass_Type %in% key_pred_groups) %>%
   group_by(scenario, Run_ID, Biomass_Type) %>%
   mutate(base = mean(Biomass[Year %in% 1:29], na.rm = TRUE),
@@ -468,9 +509,10 @@ pred_q <- pred_runs %>%
                         "WMW"="Minke whales", "SB"="Seabirds"))
 
 Fig3 <- capelin_plots(pred_q %>% filter(Year_actual >= 1996),
-                    x="Year_actual", yM="Med", yL="Q25", yU="Q75",
-                    title = "",
-                    ylab = expression("Relative biomass (B / B"[0]*")"), facet = "Group", ncol = 3, hline = 1)
+                      x="Year_actual", yM="Med", yL="Q25", yU="Q75",
+                      title = "",
+                      ylab = expression("Relative biomass (B / B"[mean] * ")"),facet = "Group", ncol = 3, hline = 1)
+Fig3
 ggsave("files_for_capelin_paper/Figures/Fig3_KeyPredators_relative_IQR.png", Fig3, width = 10, height = 5, dpi = 350)
 
 # FIGURE 4 — Ecosystem indicators (relative/delta), combined
@@ -541,9 +583,9 @@ end_summary_long <- end_summary %>%
     names_to = c("Indicator", ".value"),
     names_pattern = "(.*)_(M|L|U)") %>%
   mutate(Indicator = recode(Indicator,
-                       TB  = "Relative total biomass",
-                       MTL = "Δ Mean trophic level",
-                       PP  = "Predator : Prey ratio"))
+                            TB  = "Relative total biomass",
+                            MTL = "Δ Mean trophic level",
+                            PP  = "Predator : Prey ratio"))
 
 facet_levels <- c("Relative total biomass",
                   "Δ Mean trophic level",
@@ -587,7 +629,7 @@ Fig4<-ggplot(end_summary_long,
     strip.background = element_rect(fill = "grey80", color = "black"),
     strip.text = element_text(face = "bold")) +
   labs(y = NULL, x = NULL, color = "Scenario")
-
+Fig4
 ggsave("files_for_capelin_paper/Figures/Fig4_Indicators_combined.png", Fig4, width = 10, height = 4, dpi = 350)
 
 
@@ -672,9 +714,10 @@ pred_runs_comp %>%
     panel.grid.major.x = element_blank())
 
 Fig5 <- capelin_plots(pred_q_comp %>% filter(Year_actual >= 1996),
-                    x="Year_actual", yM="Med", yL="Q25", yU="Q75",
-                    title = "",
-                    ylab =expression("Relative biomass (B / B"[0]*")"), facet = "Group", ncol = 3, hline = 1)
+                      x="Year_actual", yM="Med", yL="Q25", yU="Q75",
+                      title = "",
+                      ylab = expression("Relative biomass (B / B"[mean] * ")"), facet = "Group", ncol = 3, hline = 1)
+Fig5
 ggsave("files_for_capelin_paper/Figures/Fig5_Competitors_relative_IQR.png", Fig5, width = 10, height = 5, dpi = 350)
 
 
@@ -702,9 +745,10 @@ prey_q_comp <- prey_runs_comp %>%
                         levels = recode(comp_groups, !!!name_map_comp)))
 
 Fig6 <- capelin_plots(prey_q_comp %>% filter(Year_actual >= 1996),
-                    x="Year_actual", yM="Med", yL="Q25", yU="Q75",
-                    title = "",
-                    ylab = expression("Relative biomass (B / B"[0]*")"), facet = "Group", ncol = 3, hline = 1)
+                      x="Year_actual", yM="Med", yL="Q25", yU="Q75",
+                      title = "",
+                      ylab = expression("Relative biomass (B / B"[mean] * ")"), facet = "Group", ncol = 3, hline = 1)
+Fig6
 ggsave("files_for_capelin_paper/Figures/Fig6_capelin_prey_relative_IQR.png", Fig6, width = 10, height = 4, dpi = 350)
 
 
@@ -758,7 +802,6 @@ table_all_groups <- dat_rel_comp %>%
   pivot_wider(names_from = scenario, values_from = Stat) %>%
   arrange(Biomass_Type)
 
-table_all_groups 
 
 
 
@@ -997,7 +1040,7 @@ comp_groups <- c(
 # for plot without filtering, switch 
 # runs_long_filtered with runs_long
 
-pred_runs_comp <- runs_long_filtered %>%
+pred_runs_comp <- runs_long %>%
   filter(Biomass_Type %in% comp_groups) %>%
   group_by(scenario, Run_ID, Biomass_Type) %>%
   mutate(base = mean(Biomass[Year %in% 1:29], na.rm = TRUE),
@@ -1013,7 +1056,7 @@ pred_q_comp <- pred_runs_comp %>%
     .groups = "drop") %>%
   mutate(Group = factor(recode(Biomass_Type, !!!name_map),
                         levels = recode(comp_groups, !!!name_map)))
-supp_w_filter<- pred_runs_comp %>%
+supp_wo_filter<- pred_runs_comp %>%
   filter(Year_actual >= 1996) %>%
   mutate(
     Group = factor(recode(Biomass_Type, !!!name_map),
@@ -1028,7 +1071,7 @@ supp_w_filter<- pred_runs_comp %>%
     "Status Quo"   = "#2CA25F")) +
   labs(
     x = "Year",
-    y = expression("Relative biomass (B / B"[0]*")"),
+    y = expression("Relative biomass (B / B"[mean]*")"),
     color = "Scenario") +
   theme_bw(base_size = 13) +
   theme(
@@ -1038,3 +1081,6 @@ supp_w_filter<- pred_runs_comp %>%
     panel.grid.major.x = element_blank())
 ggsave("files_for_capelin_paper/Figures/no_filtering.png", supp_wo_filter, width = 10, height = 10, dpi = 350)
 ggsave("files_for_capelin_paper/Figures/with_filtering.png", supp_w_filter, width = 10, height = 10, dpi = 350)
+
+
+
